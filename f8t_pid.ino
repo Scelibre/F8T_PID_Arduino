@@ -119,13 +119,13 @@ void interrupt() {
     // Protection
     if (input >= PID_FREQUENCY + PROTECT_RANGE
           || input <= PID_FREQUENCY - PROTECT_RANGE) { // Problème de régulation
-      protect_count++;
       if (protect_count > PROTECT_PERIOD) {
         digitalWrite(SECURITY_RELAY, HIGH);
         #ifdef LOG
           Serial.println("Security relay active ! (frequency not in tolerance)");
         #endif
       } else {
+        protect_count++;
         #ifdef LOG
           Serial.print("Warning, frequency not in tolerance (");
           Serial.print(protect_count);
