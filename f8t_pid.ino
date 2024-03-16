@@ -1,20 +1,25 @@
 #include <PID_v1.h>
 
-#define LOG             1           // Activer les LOGs
-#define INTERRUPT_PIN   2           // Pin d'interruption frequencielle (50Hz)
-#define ENGINE_IDLE     100         // Ralentis (valeur minimum d'accelération)
-#define ADC_RESOLUTION  8           // ADC 8 bit
-#define PID_PERIOD      1000000 / 50   // Période correspondante à 50Hz (en microsecondes)
-#define COMPUTE_PERIOD  PID_PERIOD  // Période correspondante à la frequence de calcul (en microsecondes)
-#define PROTECT_RANGE   1000000 / 6    // Coupure en cas de problème +-6Hz
-#define PROTECT_PERIOD  10          // Coupure si problème sur + 10 periodes
-#define SECURITY_RELAY  4           // Pin du relais de sécurité (coupure électrique)
+#define LOG             1                         // Activer les LOGs
+#define INTERRUPT_PIN   2                         // Pin d'interruption frequencielle (50Hz)
+#define ENGINE_IDLE     155                       // Ralentis (valeur minimum d'accelération)
+#define ENGINE_MAX      250                       // Max d'acc
+#define ADC_RESOLUTION  8                         // ADC 8 bit
+#define PID_FREQUENCY   50                        // Période correspondante à 50Hz (en microsecondes)
+#define COMPUTE_PERIOD  1000000 / PID_FREQUENCY   // Période correspondante à la frequence de calcul (en microsecondes)
+#define PROTECT_RANGE   6                         // Coupure en cas de problème +-6Hz
+#define PROTECT_PERIOD  5                         // Coupure si problème sur + 10 periodes
+#define SECURITY_RELAY  3                         // Pin du relais de sécurité (coupure électrique)
+#define INPUT_FILTER    10                        // Filtre mauvaise valeurs
+
+// Moteur tourne ou pas
+bool engine = true;
 
 // Variables connectées au PID
 double input = 0, output = 0;
 
 // Définition PID & paramètres
-double kp = 2, ki = 5, kd = 1, command = PID_PERIOD;
+double kp = 2, ki = 0.7, kd = 0.2, command = PID_FREQUENCY;
 PID motor_pid(&input, &output, &command, kp, ki, kd, DIRECT);
 
 // Enregistrement de la dernière interruption
@@ -32,6 +37,7 @@ void setup() {
 
   // Sortie relais de sécurité
   pinMode(SECURITY_RELAY, OUTPUT);
+  digitalWrite(SECURITY_RELAY, HIGH);
 
   // Interuption 50Hz (sortie comparateur)
   pinMode(INTERRUPT_PIN, INPUT);
@@ -39,32 +45,28 @@ void setup() {
 
   // Initialisation du PID
   motor_pid.SetMode(AUTOMATIC);
-  motor_pid.SetOutputLimits(ENGINE_IDLE, pow(2, ADC_RESOLUTION) - 1);
-
-  // Pause pour éviter le démarrage prématuré du calcul.
-  delay(PID_PERIOD * 10);
+  motor_pid.SetOutputLimits(ENGINE_IDLE, ENGINE_MAX);
 }
 
 void loop() {
   unsigned long loop_start = micros();
-  if (loop_start >= last_interrupt + PID_PERIOD * 10) { // Pas de signal depuis un certain temps (ou jamais reçu)
+  if (loop_start >= last_interrupt + COMPUTE_PERIOD * 10 || last_interrupt == 0) { // Pas de signal depuis un certain temps (ou jamais reçu)
     control(ENGINE_IDLE);
-          
-    #ifdef LOG
-      Serial.println("Engine is OFF.");
-    #endif
+
+    if (engine) {
+      engine = false;
+      #ifdef LOG
+        Serial.println("Engine is OFF.");
+      #endif
+    }
   } else { // Il y a du signal, calcul
+    if (!engine) {
+      engine = true;
+    }
+    
     motor_pid.Compute();
     
     control((int) output);
-
-    #ifdef LOG
-      Serial.print("Power = ");
-      Serial.print(map((int) output, ENGINE_IDLE, pow(2, ADC_RESOLUTION) - 1, 0, 100));
-      Serial.print("%, Freq = ");
-      Serial.print((float) (10000000 / input) / 10.0);
-      Serial.println("Hz");
-    #endif
   }
 
   long loop_wait = COMPUTE_PERIOD - (micros() - loop_start);
@@ -76,22 +78,52 @@ void loop() {
 }
 
 unsigned short protect_count = PROTECT_PERIOD + 1;
+unsigned short period_count = 0;
 
-void interrupt() { 
+void interrupt() {
   unsigned long actual_interrupt = micros();
-  
+
+  if (period_count <= 2) {
+    period_count++;
+    return;
+  } else {
+    period_count = 0;
+  }
+
   if (last_interrupt > 0) { // Ignorer la première interruption
     unsigned long difference = actual_interrupt - last_interrupt;
-    input = (double) difference;
 
+    double frequency = (double) (200000000 / difference) / 100.0;
+
+    if (frequency > PID_FREQUENCY - INPUT_FILTER
+          &&
+            (frequency > input + INPUT_FILTER
+          || frequency < input - INPUT_FILTER)) {
+      #ifdef LOG
+        Serial.print("Filtering bad value : ");
+        Serial.print(frequency);
+        Serial.println("Hz");
+      #endif
+    } else {
+      input = frequency;
+      
+      #ifdef LOG
+        Serial.print("Power = ");
+        Serial.print(map((int) output, ENGINE_IDLE, ENGINE_MAX, 0, 100));
+        Serial.print("%, Freq = ");
+        Serial.print(input);
+        Serial.println("Hz");
+      #endif
+    }
+    
     // Protection
-    if (difference >= PID_PERIOD + PROTECT_RANGE
-          || difference <= PID_PERIOD - PROTECT_RANGE) { // Problème de régulation
+    if (input >= PID_FREQUENCY + PROTECT_RANGE
+          || input <= PID_FREQUENCY - PROTECT_RANGE) { // Problème de régulation
       protect_count++;
       if (protect_count > PROTECT_PERIOD) {
         digitalWrite(SECURITY_RELAY, HIGH);
         #ifdef LOG
-          Serial.print("Security relay active ! (frequency not in tolerance)");
+          Serial.println("Security relay active ! (frequency not in tolerance)");
         #endif
       } else {
         #ifdef LOG
@@ -106,13 +138,13 @@ void interrupt() {
       if (protect_count > PROTECT_PERIOD) {
         digitalWrite(SECURITY_RELAY, LOW);
         #ifdef LOG
-          Serial.print("Security relay released.");
+          Serial.println("Security relay released.");
         #endif
       }
       protect_count = 0;
     }
   }
-  
+
   last_interrupt = actual_interrupt;
 }
 
